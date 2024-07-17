@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,7 +60,7 @@ func main() {
 	log.Println("Migração com sucesso da tabela")
 
 	http.HandleFunc("/", handler)
-	log.Println("Servidor iniciado na porta 8080")
+	log.Println("Servidor iniciado na porta:8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Falha ao iniciar o servidor: %v", err)
 	}
@@ -75,7 +76,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 		dolar, err := GetCotacao() // Chamada de função
 		if err != nil {
-			log.Printf("Falha ao obter cotação: %v\n", err)
+			log.Printf("Falha ao obter dados: %v\n", err)
 			http.Error(w, "Falha ao obter dados", http.StatusInternalServerError)
 			return
 		}
@@ -86,22 +87,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Cotação do dólar recebida: %+v\n", dolar)
-
+		log.Printf("Cotação do dólar recebida: %v\n", dolar.Bid)
 		cotacao := Cotacao{
 			Valor: dolar.Bid,
 			Data:  time.Now(),
 		}
-
-		if err := db.Create(&cotacao).Error; err != nil {
+		//Ctx para o banco de dados.
+		dbctx, dbcancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer dbcancel()
+		if err := dbstresstest(dbctx, cotacao); err != nil {
 			log.Printf("Erro ao salvar informações no DB: %v\n", err)
 			http.Error(w, "Erro ao salvar informações no DB", http.StatusInternalServerError)
 			return
 		}
-		w.Write([]byte("Request processada com sucesso. Valor do Dolar " + dolar.Bid))
+		w.Write([]byte("Request processada com sucesso.\nCotação do Dolar atual: $" + dolar.Bid))
 
 	case <-ctx.Done():
-		log.Println("Request cancelada pelo usuário")
+		log.Println("Request Cancelada pelo Usuário !")
 	}
 }
 
@@ -119,10 +121,10 @@ func GetCotacao() (*Dolar, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Erro ao ler o corpo da resposta: %v\n", err)
+		log.Printf("Erro de leitura do body da resposta: %v\n", err)
 		return nil, err
 	}
-	log.Printf("Resposta da API: %s\n", string(body))
+	log.Printf("Retorno API: %s\n", string(body))
 
 	var d ResponserDolar
 	if err := json.Unmarshal(body, &d); err != nil {
@@ -130,8 +132,21 @@ func GetCotacao() (*Dolar, error) {
 		return nil, err
 	}
 	if d.USDBRL.Bid == "" {
-		log.Println("Dados da cotação do dólar são inválidos")
-		return nil, fmt.Errorf("Valor do Dolar esta Nulo")
+		log.Println("Dados da cotação do dólar são Incorretos")
+		return nil, fmt.Errorf("Valor do Dolar vazio.")
 	}
 	return &d.USDBRL, nil
+}
+
+func dbstresstest(ctx context.Context, cotacao Cotacao) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- db.WithContext(ctx).Create(&cotacao).Error
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
 }
