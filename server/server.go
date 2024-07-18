@@ -70,20 +70,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log.Println("Request Iniciada")
 
-	defer log.Println("Request Finalizada")
-	select {
-	case <-time.After(5 * time.Second):
+	done := make(chan struct{})
+	errC := make(chan error, 1)
 
+	go func() {
+		defer close(done)
+		defer close(errC)
 		dolar, err := GetCotacao() // Chamada de função
 		if err != nil {
 			log.Printf("Falha ao obter dados: %v\n", err)
 			http.Error(w, "Falha ao obter dados", http.StatusInternalServerError)
+			errC <- err
 			return
 		}
 
 		if dolar == nil {
 			log.Println("Dados do dólar são nulos")
 			http.Error(w, "Dados do dólar são nulos", http.StatusInternalServerError)
+			errC <- fmt.Errorf("Dados Inválidos")
 			return
 		}
 
@@ -98,13 +102,29 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if err := dbstresstest(dbctx, cotacao); err != nil {
 			log.Printf("Erro ao salvar informações no DB: %v\n", err)
 			http.Error(w, "Erro ao salvar informações no DB", http.StatusInternalServerError)
+			errC <- err
 			return
 		}
 		w.Write([]byte("Request processada com sucesso.\nCotação do Dolar atual: $" + dolar.Bid))
-
+	}()
+	//defer log.Println("Request Finalizada")
+	select {
 	case <-ctx.Done():
-		log.Println("Request Cancelada pelo Usuário !")
+		log.Println("Request Cancelada pelo Usuário!")
+		http.Error(w, "Request Cancelada pelo Usuário!", http.StatusRequestTimeout)
+	case err := <-errC:
+		if err != nil {
+			http.Error(w, "Erro interno do servidor", http.StatusInternalServerError)
+		}
+	case <-done:
+		log.Println("Request processada com sucesso!")
 	}
+	// select {
+	// case <-time.After(5 * time.Second):
+
+	// case <-ctx.Done():
+	// 	log.Println("Request Cancelada pelo Usuário !")
+	// }
 }
 
 func GetCotacao() (*Dolar, error) {
