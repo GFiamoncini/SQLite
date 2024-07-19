@@ -9,18 +9,14 @@ import (
 	"net/http"
 	"time"
 
-	//_ "github.com/go-sql-driver/mysql"
-	//"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-// Necessário criar Cabeçalho
 type ResponserDolar struct {
 	USDBRL Dolar `json:"USDBRL"`
 }
 
-// Struct conforme JSON Dolar
 type Dolar struct {
 	Code       string `json:"code"`
 	CodeIn     string `json:"codein"`
@@ -35,10 +31,9 @@ type Dolar struct {
 	CreateDate string `json:"create_date"`
 }
 
-// Tabela cotacao
 type Cotacao struct {
 	ID    int       `gorm:"primaryKey"`
-	Valor string    `json:"valor"`
+	Valor string    `gorm:"index"`
 	Data  time.Time `json:"data"`
 }
 
@@ -59,7 +54,7 @@ func main() {
 	}
 	log.Println("Migração com sucesso da tabela")
 
-	http.HandleFunc("/", handler)
+	http.HandleFunc("/cotacao", handler)
 	log.Println("Servidor iniciado na porta:8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Falha ao iniciar o servidor: %v", err)
@@ -70,67 +65,68 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log.Println("Request Iniciada")
 
-	done := make(chan struct{})
-	errC := make(chan error, 1)
+	start := time.Now()
 
-	go func() {
-		defer close(done)
-		defer close(errC)
-		dolar, err := GetCotacao() // Chamada de função
-		if err != nil {
-			log.Printf("Falha ao obter dados: %v\n", err)
-			http.Error(w, "Falha ao obter dados", http.StatusInternalServerError)
-			errC <- err
-			return
-		}
+	/*
+		TestCase-01- Adicionando ao context da API em MiliSecond, retorna o valor esperado.
+		TestCase-02- Adicionando ao context da API em NanoSecond, retorna o valor esperado - "context deadline exceeded"
+	*/
 
-		if dolar == nil {
-			log.Println("Dados do dólar são nulos")
-			http.Error(w, "Dados do dólar são nulos", http.StatusInternalServerError)
-			errC <- fmt.Errorf("Dados Inválidos")
-			return
-		}
+	//TestCase01 - "200Ms"
+	apiCtx, apiCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 
-		log.Printf("Cotação do dólar recebida: %v\n", dolar.Bid)
-		cotacao := Cotacao{
-			Valor: dolar.Bid,
-			Data:  time.Now(),
-		}
-		//Ctx para o banco de dados.
-		dbctx, dbcancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		defer dbcancel()
-		if err := dbstresstest(dbctx, cotacao); err != nil {
-			log.Printf("Erro ao salvar informações no DB: %v\n", err)
-			http.Error(w, "Erro ao salvar informações no DB", http.StatusInternalServerError)
-			errC <- err
-			return
-		}
-		w.Write([]byte("Request processada com sucesso.\nCotação do Dolar atual: $" + dolar.Bid))
-	}()
-	//defer log.Println("Request Finalizada")
-	select {
-	case <-ctx.Done():
-		log.Println("Request Cancelada pelo Usuário!")
-		http.Error(w, "Request Cancelada pelo Usuário!", http.StatusRequestTimeout)
-	case err := <-errC:
-		if err != nil {
-			http.Error(w, "Erro interno do servidor", http.StatusInternalServerError)
-		}
-	case <-done:
-		log.Println("Request processada com sucesso!")
+	//TestCase02 - "200Ns"
+	//apiCtx, apiCancel := context.WithTimeout(ctx, 200*time.Nanosecond)
+	defer apiCancel()
+
+	dolar, err := GetCotacao(apiCtx)
+	if err != nil {
+		log.Printf("Falha ao obter dados: %v\n", err)
+		http.Error(w, "Erro ao obter a cotação do dólar. Timeout", http.StatusInternalServerError)
+		return
 	}
-	// select {
-	// case <-time.After(5 * time.Second):
 
-	// case <-ctx.Done():
-	// 	log.Println("Request Cancelada pelo Usuário !")
-	// }
+	if dolar == nil {
+		log.Println("Dados do dólar são nulos")
+		http.Error(w, "Dados do dólar são nulos", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Cotação do dólar recebida: %v\n", dolar.Bid)
+	cotacao := Cotacao{
+		Valor: dolar.Bid,
+		Data:  time.Now(),
+	}
+
+	/*
+		       TestCase-01- Adicionando ao context do DB em MiliSecond, retorna o valor esperado.
+			   TestCase-02- Adicionando ao context do DB em NanoSecond, retorna o valor esperado - "context deadline exceeded"
+	*/
+
+	//TesteCase01 - 10Ms - DB
+	dbCtx, dbCancel := context.WithTimeout(ctx, 10*time.Millisecond)
+
+	//TesteCase02 - 10Ns - DB
+	//dbCtx, dbCancel := context.WithTimeout(ctx, 10*time.Nanosecond)
+
+	defer dbCancel()
+	if err := dbstresstest(dbCtx, cotacao); err != nil {
+		log.Printf("Erro ao salvar informações no DB: %v\n", err)
+		http.Error(w, "Erro ao salvar informações no DB. Tente novamente(Timeout).", http.StatusInternalServerError)
+		return
+	}
+	w.Write([]byte("Request processada com sucesso.Cotação do Dolar atual: $" + dolar.Bid + "\n"))
+	log.Printf("Tempo de Operacao: %v\n", time.Since(start))
 }
 
-func GetCotacao() (*Dolar, error) {
-	resp, err := http.Get("https://economia.awesomeapi.com.br/json/last/USD-BRL")
+func GetCotacao(ctx context.Context) (*Dolar, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
 	if err != nil {
-		log.Printf("Erro ao fazer request para a API: %v\n", err)
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -141,32 +137,20 @@ func GetCotacao() (*Dolar, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Erro de leitura do body da resposta: %v\n", err)
 		return nil, err
 	}
 	log.Printf("Retorno API: %s\n", string(body))
 
 	var d ResponserDolar
 	if err := json.Unmarshal(body, &d); err != nil {
-		log.Printf("Erro ao deserializar JSON: %v\n", err)
 		return nil, err
 	}
 	if d.USDBRL.Bid == "" {
-		log.Println("Dados da cotação do dólar são Incorretos")
 		return nil, fmt.Errorf("Valor do Dolar vazio.")
 	}
 	return &d.USDBRL, nil
 }
 
 func dbstresstest(ctx context.Context, cotacao Cotacao) error {
-	done := make(chan error, 1)
-	go func() {
-		done <- db.WithContext(ctx).Create(&cotacao).Error
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		return err
-	}
+	return db.WithContext(ctx).Create(&cotacao).Error
 }
